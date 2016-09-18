@@ -185,11 +185,10 @@ func (s *session) finishTxn(rollback bool) error {
 	if s.txn == nil {
 		return nil
 	}
-	sessVar := variable.GetSessionVars(s)
 	defer func() {
 		s.ClearValue(executor.DirtyDBKey)
 		s.txn = nil
-		sessVar.SetStatusFlag(mysql.ServerStatusInTrans, false)
+		variable.GetSessionVars(s).SetStatusFlag(mysql.ServerStatusInTrans, false)
 		binloginfo.ClearBinlog(s)
 	}()
 

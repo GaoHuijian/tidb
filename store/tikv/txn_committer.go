@@ -405,7 +405,7 @@ func (c *txnCommitter) prewriteBinlog() chan error {
 				err = errors.New(resp.Errmsg)
 			}
 		}
-		ch <- err
+		ch <- errors.Trace(err)
 	}()
 	return ch
 }
@@ -425,9 +425,8 @@ func (c *txnCommitter) rollbackBinlog() {
 		resp, err := binloginfo.PumpClient.WriteBinlog(context.Background(), req)
 		if err != nil {
 			log.Error(err)
-			return
 		}
-		if resp.Errmsg != "" {
+		if resp != nil && resp.Errmsg != "" {
 			log.Error(resp.Errmsg)
 		}
 	}()
