@@ -233,7 +233,7 @@ func (t *Table) UpdateRecord(ctx context.Context, h int64, oldData []types.Datum
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if binloginfo.PumpClient != nil {
+	if shouldWriteBinlog(ctx) {
 		mutation := t.getMutation(ctx)
 		bin, err := codec.EncodeValue(nil, newData...)
 		if err != nil {
@@ -367,7 +367,7 @@ func (t *Table) AddRecord(ctx context.Context, r []types.Datum) (recordID int64,
 	if err = bs.SaveTo(txn); err != nil {
 		return 0, errors.Trace(err)
 	}
-	if binloginfo.PumpClient != nil {
+	if shouldWriteBinlog(ctx) {
 		mutation := t.getMutation(ctx)
 		bin, err := codec.EncodeValue(nil, r...)
 		if err != nil {
@@ -532,7 +532,7 @@ func (t *Table) RemoveRecord(ctx context.Context, h int64, r []types.Datum) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if binloginfo.PumpClient != nil {
+	if shouldWriteBinlog(ctx) {
 		err = t.addDeleteBinlog(ctx, h, r)
 	}
 	return errors.Trace(err)
@@ -720,6 +720,14 @@ func (t *Table) Seek(ctx context.Context, h int64) (int64, bool, error) {
 		return 0, false, errors.Trace(err)
 	}
 	return handle, true, nil
+}
+
+func shouldWriteBinlog(ctx context.Context) bool {
+	if binloginfo.PumpClient == nil {
+		return false
+	}
+	sessVar := variable.GetSessionVars(ctx)
+	return !sessVar.InRestrictedSQL
 }
 
 func (t *Table) getMutation(ctx context.Context) *binlog.TableMutation {

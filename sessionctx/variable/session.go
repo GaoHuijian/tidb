@@ -108,6 +108,9 @@ type SessionVars struct {
 
 	// InUpdateStmt indicates if the session is handling update stmt.
 	InUpdateStmt bool
+
+	// InRestrictedSQL indicates if the session is handling restricted SQL execution.
+	InRestrictedSQL bool
 }
 
 // sessionVarsKeyType is a dummy type to avoid naming collision in context.

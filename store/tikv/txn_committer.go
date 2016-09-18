@@ -414,6 +414,10 @@ func (c *txnCommitter) rollbackBinlog() {
 	if binloginfo.PumpClient == nil {
 		return
 	}
+	prewriteValue := c.txn.us.GetOption(kv.BinlogData)
+	if prewriteValue == nil {
+		return
+	}
 	go func() {
 		binRollback := &binlog.Binlog{
 			Tp:          binlog.BinlogType_Rollback,
@@ -434,6 +438,10 @@ func (c *txnCommitter) rollbackBinlog() {
 
 func (c *txnCommitter) writeCommitBinlog() {
 	if binloginfo.PumpClient == nil {
+		return
+	}
+	prewriteValue := c.txn.us.GetOption(kv.BinlogData)
+	if prewriteValue == nil {
 		return
 	}
 	go func() {

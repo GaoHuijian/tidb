@@ -333,7 +333,10 @@ func (s *session) ExecRestrictedSQL(ctx context.Context, sql string) (ast.Record
 	// For example only support DML on system meta table.
 	// TODO: Add more restrictions.
 	log.Debugf("Executing %s [%s]", st.OriginText(), sql)
+	sessVar := variable.GetSessionVars(ctx)
+	sessVar.InRestrictedSQL = true
 	rs, err := st.Exec(ctx)
+	sessVar.InRestrictedSQL = false
 	return rs, errors.Trace(err)
 }
 
