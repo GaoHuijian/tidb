@@ -16,6 +16,7 @@ package binloginfo_test
 import (
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,11 +39,16 @@ func TestT(t *testing.T) {
 }
 
 type mockBinlogPump struct {
-	payloads [][]byte
+	mu struct {
+		sync.Mutex
+		payloads [][]byte
+	}
 }
 
 func (p *mockBinlogPump) WriteBinlog(ctx context.Context, req *binlog.WriteBinlogReq) (*binlog.WriteBinlogResp, error) {
-	p.payloads = append(p.payloads, req.Payload)
+	p.mu.Lock()
+	p.mu.payloads = append(p.mu.payloads, req.Payload)
+	p.mu.Unlock()
 	return &binlog.WriteBinlogResp{}, nil
 }
 
@@ -89,9 +95,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists local_binlog")
 	tk.MustExec("create table local_binlog (id int primary key, name varchar(10))")
-	sleepInterval := time.Millisecond * 3
 	tk.MustExec("insert local_binlog values (1, 'abc'), (2, 'cde')")
-	time.Sleep(sleepInterval)
 	pump := s.pump
 	prewriteVal := getLatestBinlogPrewriteValue(c, pump)
 	c.Assert(prewriteVal.SchemaVersion, Greater, int64(0))
@@ -101,22 +105,18 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	c.Assert(prewriteVal.Mutations[0].InsertedRows, DeepEquals, [][]byte{insertedRow1, insertedRow2})
 
 	tk.MustExec("update local_binlog set name = 'xyz' where id = 2")
-	time.Sleep(sleepInterval)
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 	updatedRow, _ := codec.EncodeValue(nil, types.NewIntDatum(2), types.NewStringDatum("xyz"))
 	c.Assert(prewriteVal.Mutations[0].UpdatedRows, DeepEquals, [][]byte{updatedRow})
 
 	tk.MustExec("delete from local_binlog where id = 1")
-	time.Sleep(sleepInterval)
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 	c.Assert(prewriteVal.Mutations[0].DeletedIds, DeepEquals, []int64{1})
 
 	// Test table primary key is not integer.
 	tk.MustExec("create table local_binlog2 (name varchar(64) primary key)")
 	tk.MustExec("insert local_binlog2 values ('abc'), ('def')")
-	time.Sleep(sleepInterval)
 	tk.MustExec("delete from local_binlog2 where name = 'def'")
-	time.Sleep(sleepInterval)
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 	_, deletedPK, _ := codec.DecodeOne(prewriteVal.Mutations[0].DeletedPks[0])
 	c.Assert(deletedPK.GetString(), Equals, "def")
@@ -124,9 +124,7 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	// Test Table don't have primary key.
 	tk.MustExec("create table local_binlog3 (c1 int, c2 int)")
 	tk.MustExec("insert local_binlog3 values (1, 2), (1, 3), (2, 3)")
-	time.Sleep(sleepInterval)
 	tk.MustExec("delete from local_binlog3 where c2 = 3")
-	time.Sleep(sleepInterval)
 	prewriteVal = getLatestBinlogPrewriteValue(c, pump)
 
 	deletedRow1, _ := codec.Decode(prewriteVal.Mutations[0].DeletedRows[0], 2)
@@ -134,32 +132,61 @@ func (s *testBinlogSuite) TestBinlog(c *C) {
 	deletedRow2, _ := codec.Decode(prewriteVal.Mutations[0].DeletedRows[1], 2)
 	c.Assert(deletedRow2[1], DeepEquals, types.NewIntDatum(3))
 
-	originBinlogLen := len(pump.payloads)
+	checkPrewriteMatchHalfBinlogCount(c, pump)
+
+	pump.mu.Lock()
+	originBinlogLen := len(pump.mu.payloads)
+	pump.mu.Unlock()
 	tk.MustExec("set @@global.autocommit = 0")
 	tk.MustExec("set @@global.autocommit = 1")
-	c.Assert(len(pump.payloads), Equals, originBinlogLen)
+	pump.mu.Lock()
+	newBinlogLen := len(pump.mu.payloads)
+	pump.mu.Unlock()
+	c.Assert(newBinlogLen, Equals, originBinlogLen)
 }
 
 func getLatestBinlogPrewriteValue(c *C, pump *mockBinlogPump) *binlog.PrewriteValue {
-	idx := len(pump.payloads) - 2
-	c.Assert(idx, Greater, 0)
-	prewritePayload := pump.payloads[idx]
-	commitPayload := pump.payloads[idx+1]
-	bin := &binlog.Binlog{}
-	bin.Unmarshal(commitPayload)
-	c.Assert(bin.Tp, Equals, binlog.BinlogType_Commit)
-	c.Assert(bin.StartTs, Greater, int64(0))
-	c.Assert(bin.CommitTs, Greater, int64(0))
-	c.Assert(bin.PrewriteKey, NotNil)
-	bin = &binlog.Binlog{}
-	err := bin.Unmarshal(prewritePayload)
-	c.Assert(err, IsNil)
-	c.Assert(bin.Tp, Equals, binlog.BinlogType_Prewrite)
-	c.Assert(bin.StartTs, Greater, int64(0))
-	c.Assert(bin.PrewriteKey, NotNil)
-	c.Assert(bin.PrewriteValue, NotNil)
-	prewriteValue := new(binlog.PrewriteValue)
-	err = prewriteValue.Unmarshal(bin.PrewriteValue)
-	c.Assert(err, IsNil)
-	return prewriteValue
+	var bin *binlog.Binlog
+	pump.mu.Lock()
+	for i := len(pump.mu.payloads) - 1; i >= 0; i-- {
+		payload := pump.mu.payloads[i]
+		bin = new(binlog.Binlog)
+		bin.Unmarshal(payload)
+		if bin.Tp == binlog.BinlogType_Prewrite {
+			break
+		}
+	}
+	pump.mu.Unlock()
+	c.Assert(bin, NotNil)
+	preVal := new(binlog.PrewriteValue)
+	preVal.Unmarshal(bin.PrewriteValue)
+	return preVal
+}
+
+func checkPrewriteMatchHalfBinlogCount(c *C, pump *mockBinlogPump) {
+	var bin *binlog.Binlog
+	prewriteCount := 0
+	pump.mu.Lock()
+	length := len(pump.mu.payloads)
+	for i := length - 1; i >= 0; i-- {
+		payload := pump.mu.payloads[i]
+		bin = new(binlog.Binlog)
+		bin.Unmarshal(payload)
+		if bin.Tp == binlog.BinlogType_Prewrite {
+			prewriteCount++
+		}
+	}
+	pump.mu.Unlock()
+	match := false
+	for i := 0; i < 10; i++ {
+		pump.mu.Lock()
+		length = len(pump.mu.payloads)
+		pump.mu.Unlock()
+		if prewriteCount*2 == length {
+			match = true
+			break
+		}
+		time.Sleep(time.Millisecond * 10)
+	}
+	c.Assert(match, IsTrue)
 }
